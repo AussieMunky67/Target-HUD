@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "name": "Target HUD",
   "description": "Look at a player to see their username, health bar and armor durability under your crosshair. Client-side.",
-  "authors": ["Kobe"],
+  "authors": ["Munky"],
   "license": "MIT",
   "environment": "client",
   "entrypoints": {
