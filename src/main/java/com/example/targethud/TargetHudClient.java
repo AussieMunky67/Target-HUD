@@ -38,22 +38,24 @@ import java.util.Properties;
  *   position = crosshair | left | right
  *   offsetX / offsetY = extra pixels to nudge it
  *   range = how many blocks away a player can be (default 30)
+ *   aimRadius = extra blocks around a player's hitbox that still count (default 1.5)
  * The file is re-read automatically every couple of seconds, so you can edit it while playing.
  */
 public class TargetHudClient implements ClientModInitializer {
     private static final EquipmentSlot[] ARMOR = {
         EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET
     };
-    private static final String[] ARMOR_LABEL = {"Helmet", "Chest", "Legs", "Boots"};
+    private static final String[] ARMOR_LABEL = {"Helm", "Chest", "Legs", "Boots"};
  
-    private static final int PANEL_W = 170;
-    private static final int PANEL_H = 84;
+    private static final int PANEL_W = 156;
+    private static final int PANEL_H = 60;
  
     // --- config ---
     private static String position = "crosshair";
-    private static int offsetX = -50;
+    private static int offsetX = 0;
     private static int offsetY = 0;
     private static double range = 30;
+    private static double aimRadius = 1.5;   // blocks around a player's hitbox that still count (1.5 = about a 3x3 area)
     private static Path configPath;
     private static long configModified = -1;
     private static long lastConfigCheck = 0;
@@ -98,8 +100,9 @@ public class TargetHudClient implements ClientModInitializer {
                 defaults.setProperty("offsetX", "0");
                 defaults.setProperty("offsetY", "0");
                 defaults.setProperty("range", "30");
+                defaults.setProperty("aimRadius", "1.5");
                 try (OutputStream out = Files.newOutputStream(configPath)) {
-                    defaults.store(out, "Target HUD. position = crosshair | left | right. offsetX/offsetY nudge it in pixels. range = max distance in blocks.");
+                    defaults.store(out, "Target HUD. position = crosshair | left | right. offsetX/offsetY nudge it in pixels. range = max distance in blocks. aimRadius = extra blocks around a player that still count as looking at them.");
                 }
             }
             Properties p = new Properties();
@@ -110,9 +113,18 @@ public class TargetHudClient implements ClientModInitializer {
             offsetX = parseInt(p.getProperty("offsetX"), 0);
             offsetY = parseInt(p.getProperty("offsetY"), 0);
             range = Math.max(3, Math.min(128, parseInt(p.getProperty("range"), 30)));
+            aimRadius = Math.max(0, Math.min(10, parseDouble(p.getProperty("aimRadius"), 1.5)));
             configModified = Files.getLastModifiedTime(configPath).toMillis();
         } catch (IOException | RuntimeException ignored) {
             // keep the previous settings if the file can't be read
+        }
+    }
+ 
+    private static double parseDouble(String s, double fallback) {
+        try {
+            return s == null ? fallback : Double.parseDouble(s.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
         }
     }
  
@@ -152,7 +164,7 @@ public class TargetHudClient implements ClientModInitializer {
         double bestSq = limitSq;
         for (Player p : mc.level.players()) {
             if (p == mc.player || p.isSpectator()) continue;
-            AABB box = p.getBoundingBox().inflate(0.1);
+            AABB box = p.getBoundingBox().inflate(aimRadius);
             Optional<Vec3> hit = box.clip(eye, end);
             if (hit.isPresent()) {
                 double d = eye.distanceToSqr(hit.get());
@@ -223,16 +235,20 @@ public class TargetHudClient implements ClientModInitializer {
             + (absorption > 0 ? String.format(" (+%.0f)", absorption) : "");
         g.text(font, hpText, x + 4, y + 26, 0xFFFFFFFF, true);
  
-        // armor durability: coloured bar plus the actual numbers (remaining / max)
+        // armor durability: numbers only, two columns
+        // left column: Helm, Chest    right column: Legs, Boots
         for (int i = 0; i < ARMOR.length; i++) {
-            int rowY = y + 38 + i * 10;
-            ItemStack stack = target.getItemBySlot(ARMOR[i]);
-            g.text(font, ARMOR_LABEL[i], x + 4, rowY, 0xFFAAAAAA, false);
+            int col = i / 2;   // 0 = left, 1 = right
+            int row = i % 2;
+            int labelX = x + 4 + col * 76;
+            int numX = labelX + 32;
+            int rowY = y + 38 + row * 10;
  
-            int bx = x + 44, bw = 60, bh = 6;
-            g.fill(bx, rowY + 1, bx + bw, rowY + 1 + bh, 0xFF202020);
+            ItemStack stack = target.getItemBySlot(ARMOR[i]);
+            g.text(font, ARMOR_LABEL[i], labelX, rowY, 0xFFAAAAAA, false);
+ 
             if (stack.isEmpty()) {
-                g.text(font, "-", bx + bw + 6, rowY, 0xFF777777, false);
+                g.text(font, "-", numX, rowY, 0xFF777777, false);
                 continue;
             }
  
@@ -248,12 +264,9 @@ public class TargetHudClient implements ClientModInitializer {
                 else if (frac >= 0.2f) color = 0xFFFF9020;
                 else color = 0xFFE02828;
  
-                g.fill(bx, rowY + 1, bx + (int) (bw * frac), rowY + 1 + bh, color);
-                g.text(font, left + "/" + maxDur, bx + bw + 6, rowY, 0xFFFFFFFF, true);
+                g.text(font, left + "/" + maxDur, numX, rowY, color, true);
             } else {
-                // unbreakable armor: full green bar
-                g.fill(bx, rowY + 1, bx + bw, rowY + 1 + bh, 0xFF3CC83C);
-                g.text(font, "Unbreakable", bx + bw + 6, rowY, 0xFFFFFFFF, true);
+                g.text(font, "Unbr.", numX, rowY, 0xFF3CC83C, true);
             }
         }
     }
