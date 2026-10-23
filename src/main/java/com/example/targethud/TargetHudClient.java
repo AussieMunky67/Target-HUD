@@ -46,12 +46,12 @@ public class TargetHudClient implements ClientModInitializer {
     };
     private static final String[] ARMOR_LABEL = {"Helmet", "Chest", "Legs", "Boots"};
  
-    private static final int PANEL_W = 170;
-    private static final int PANEL_H = 84;
+    private static final int PANEL_W = 130;
+    private static final int PANEL_H = 57;
  
     // --- config ---
     private static String position = "crosshair";
-    private static int offsetX = 0;
+    private static int offsetX = -50;
     private static int offsetY = 0;
     private static double range = 30;
     private static Path configPath;
