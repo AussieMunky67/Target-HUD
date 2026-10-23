@@ -1,5 +1,5 @@
 package com.example.targethud;
- 
+
 import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -8,68 +8,70 @@ import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.DeltaTracker;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
-import net.minecraft.client.KeyMapping;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ClipContext;
-import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
- 
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Optional;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Properties;
- 
+
 /**
- * Client-side HUD: when your crosshair is on another player, a small panel shows their
- * username, a health bar and the durability of each armor piece.
+ * Client-side HUD: a small panel floats next to every player within range (default 20 blocks),
+ * on the right-hand side of the player as you see them. It shows the username, a health bar
+ * and the durability numbers of their armor. Players behind walls are shown unless throughWalls=false.
  *
- * Position is set in config/targethud.properties (created on first launch):
- *   position = crosshair | left | right
- *   offsetX / offsetY = extra pixels to nudge it
- *   range = how many blocks away a player can be (default 30)
- *   aimRadius = extra blocks around a player's hitbox that still count (default 1.5)
- * The file is re-read automatically every couple of seconds, so you can edit it while playing.
+ * Settings live in config/targethud.properties (created on first launch):
+ *   range   = how many blocks away players are shown (default 20)
+ *   offsetX / offsetY = nudge every panel by a few pixels
+ *   throughWalls = true to show players behind walls, false to hide them (default true)
+ * The file is re-read automatically every couple of seconds.
+ * Press ; (rebindable in Controls) to switch the HUD on and off.
  */
 public class TargetHudClient implements ClientModInitializer {
     private static final EquipmentSlot[] ARMOR = {
         EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET
     };
     private static final String[] ARMOR_LABEL = {"Helm", "Chest", "Legs", "Boots"};
- 
+
     private static final int PANEL_W = 156;
     private static final int PANEL_H = 60;
- 
+    private static final int MAX_PANELS = 10;   // only the closest players get a panel, to avoid clutter
+
     // --- config ---
-    private static String position = "crosshair";
+    private static double range = 20;
     private static int offsetX = 0;
     private static int offsetY = 0;
-    private static double range = 30;
-    private static double aimRadius = 1.5;   // blocks around a player's hitbox that still count (1.5 = about a 3x3 area)
+    private static boolean throughWalls = true;   // true = also show players behind walls
     private static Path configPath;
     private static long configModified = -1;
     private static long lastConfigCheck = 0;
- 
+
     // --- toggle (press ; by default, rebindable in Controls) ---
     private static boolean enabled = true;
     private static long toggledAt = 0;
     private static KeyMapping toggleKey;
- 
+
     @Override
     public void onInitializeClient() {
         configPath = FabricLoader.getInstance().getConfigDir().resolve("targethud.properties");
         loadConfig();
- 
+
         KeyMapping.Category category = KeyMapping.Category.register(
             Identifier.fromNamespaceAndPath("targethud", "main"));
         toggleKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
@@ -84,50 +86,40 @@ public class TargetHudClient implements ClientModInitializer {
                 toggledAt = System.currentTimeMillis();
             }
         });
- 
+
         HudElementRegistry.attachElementBefore(
             VanillaHudElements.CHAT,
             Identifier.fromNamespaceAndPath("targethud", "target_info"),
             TargetHudClient::extract
         );
     }
- 
+
     private static void loadConfig() {
         try {
             if (!Files.exists(configPath)) {
                 Properties defaults = new Properties();
-                defaults.setProperty("position", "crosshair");
+                defaults.setProperty("range", "20");
                 defaults.setProperty("offsetX", "0");
                 defaults.setProperty("offsetY", "0");
-                defaults.setProperty("range", "30");
-                defaults.setProperty("aimRadius", "1.5");
+                defaults.setProperty("throughWalls", "true");
                 try (OutputStream out = Files.newOutputStream(configPath)) {
-                    defaults.store(out, "Target HUD. position = crosshair | left | right. offsetX/offsetY nudge it in pixels. range = max distance in blocks. aimRadius = extra blocks around a player that still count as looking at them.");
+                    defaults.store(out, "Target HUD. range = max distance in blocks. offsetX/offsetY nudge the panels in pixels. throughWalls = true/false, show players behind walls.");
                 }
             }
             Properties p = new Properties();
             try (InputStream in = Files.newInputStream(configPath)) {
                 p.load(in);
             }
-            position = p.getProperty("position", "crosshair").trim().toLowerCase();
+            range = Math.max(3, Math.min(128, parseInt(p.getProperty("range"), 20)));
             offsetX = parseInt(p.getProperty("offsetX"), 0);
             offsetY = parseInt(p.getProperty("offsetY"), 0);
-            range = Math.max(3, Math.min(128, parseInt(p.getProperty("range"), 30)));
-            aimRadius = Math.max(0, Math.min(10, parseDouble(p.getProperty("aimRadius"), 1.5)));
+            throughWalls = Boolean.parseBoolean(p.getProperty("throughWalls", "true").trim());
             configModified = Files.getLastModifiedTime(configPath).toMillis();
         } catch (IOException | RuntimeException ignored) {
             // keep the previous settings if the file can't be read
         }
     }
- 
-    private static double parseDouble(String s, double fallback) {
-        try {
-            return s == null ? fallback : Double.parseDouble(s.trim());
-        } catch (NumberFormatException e) {
-            return fallback;
-        }
-    }
- 
+
     private static int parseInt(String s, int fallback) {
         try {
             return s == null ? fallback : Integer.parseInt(s.trim());
@@ -135,7 +127,7 @@ public class TargetHudClient implements ClientModInitializer {
             return fallback;
         }
     }
- 
+
     private static void reloadIfChanged() {
         long now = System.currentTimeMillis();
         if (now - lastConfigCheck < 2000) return;
@@ -147,81 +139,81 @@ public class TargetHudClient implements ClientModInitializer {
         } catch (IOException ignored) {
         }
     }
- 
-    /** Finds the player under the crosshair up to `range` blocks away, ignoring players behind walls. */
-    private static Player findTarget(Minecraft mc, double range) {
-        Vec3 eye = mc.player.getEyePosition();
-        Vec3 end = eye.add(mc.player.getViewVector(1.0f).scale(range));
- 
-        // how far can we see before a block gets in the way?
-        BlockHitResult blockHit = mc.level.clip(
-            new ClipContext(eye, end, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, mc.player));
-        double limitSq = blockHit.getType() == HitResult.Type.MISS
-            ? range * range
-            : eye.distanceToSqr(blockHit.getLocation());
- 
-        Player best = null;
-        double bestSq = limitSq;
-        for (Player p : mc.level.players()) {
-            if (p == mc.player || p.isSpectator()) continue;
-            AABB box = p.getBoundingBox().inflate(aimRadius);
-            Optional<Vec3> hit = box.clip(eye, end);
-            if (hit.isPresent()) {
-                double d = eye.distanceToSqr(hit.get());
-                if (d < bestSq) {
-                    best = p;
-                    bestSq = d;
-                }
-            }
-        }
-        return best;
-    }
- 
+
     private static void extract(GuiGraphicsExtractor g, DeltaTracker delta) {
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || mc.level == null) return;
         reloadIfChanged();
- 
+
+        int sw = mc.getWindow().getGuiScaledWidth();
+        int sh = mc.getWindow().getGuiScaledHeight();
+
         // brief "ON / OFF" confirmation after pressing the toggle key
         if (System.currentTimeMillis() - toggledAt < 1500) {
             String msg = "Target HUD: " + (enabled ? "ON" : "OFF");
-            g.text(mc.font, msg, mc.getWindow().getGuiScaledWidth() / 2 - mc.font.width(msg) / 2, 20,
+            g.text(mc.font, msg, sw / 2 - mc.font.width(msg) / 2, 20,
                    enabled ? 0xFF55FF55 : 0xFFFF5555, true);
         }
         if (!enabled) return;
- 
-        Player target = findTarget(mc, range);
-        if (target == null) return;
- 
-        Font font = mc.font;
-        int sw = mc.getWindow().getGuiScaledWidth();
-        int sh = mc.getWindow().getGuiScaledHeight();
- 
-        int x;
-        int y;
-        switch (position) {
-            case "left" -> {            // middle of the screen, against the left edge
-                x = 4;
-                y = sh / 2 - PANEL_H / 2;
-            }
-            case "right" -> {           // middle of the screen, against the right edge
-                x = sw - PANEL_W - 4;
-                y = sh / 2 - PANEL_H / 2;
-            }
-            default -> {                // just under the crosshair
-                x = sw / 2 - PANEL_W / 2;
-                y = sh / 2 + 20;
-            }
+
+        // camera basis (first person): forward, right, up
+        Vec3 eye = mc.player.getEyePosition();
+        Vec3 fwd = mc.player.getViewVector(1.0f);
+        double hLen = Math.sqrt(fwd.x * fwd.x + fwd.z * fwd.z);
+        if (hLen < 1.0E-4) return;   // looking straight up/down
+        Vec3 right = new Vec3(-fwd.z / hLen, 0.0, fwd.x / hLen);
+        Vec3 up = new Vec3(-fwd.x * fwd.y / hLen, hLen, -fwd.z * fwd.y / hLen);
+
+        double tanHalf = Math.tan(Math.toRadians(mc.options.fov().get()) / 2.0);
+        double aspect = (double) sw / sh;
+
+        // collect the closest players in range
+        List<Player> players = new ArrayList<>();
+        double rangeSq = range * range;
+        for (Player p : mc.level.players()) {
+            if (p == mc.player || p.isSpectator()) continue;
+            if (eye.distanceToSqr(p.getX(), p.getY(), p.getZ()) > rangeSq) continue;
+            players.add(p);
         }
-        x += offsetX;
-        y += offsetY;
- 
+        players.sort(Comparator.comparingDouble(p -> eye.distanceToSqr(p.getX(), p.getY(), p.getZ())));
+        if (players.size() > MAX_PANELS) players = players.subList(0, MAX_PANELS);
+
+        // draw far panels first so near ones end up on top
+        for (int i = players.size() - 1; i >= 0; i--) {
+            Player p = players.get(i);
+
+            // optionally hide players behind walls
+            if (!throughWalls) {
+                Vec3 chest = new Vec3(p.getX(), p.getEyeY(), p.getZ());
+                BlockHitResult wall = mc.level.clip(
+                    new ClipContext(eye, chest, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, mc.player));
+                if (wall.getType() != HitResult.Type.MISS) continue;
+            }
+
+            // point just to the right of the player's body, at mid height
+            Vec3 anchor = new Vec3(p.getX(), p.getY() + p.getBbHeight() * 0.5, p.getZ())
+                .add(right.scale(p.getBbWidth() / 2.0 + 0.4));
+            Vec3 d = anchor.subtract(eye);
+            double depth = d.dot(fwd);
+            if (depth < 0.3) continue;   // behind the camera
+
+            double nx = d.dot(right) / (depth * tanHalf * aspect);
+            double ny = d.dot(up) / (depth * tanHalf);
+            int x = (int) (sw / 2.0 + nx * (sw / 2.0)) + offsetX;
+            int y = (int) (sh / 2.0 - ny * (sh / 2.0)) - PANEL_H / 2 + offsetY;
+
+            if (x > sw || x + PANEL_W < 0 || y > sh || y + PANEL_H < 0) continue;   // off screen
+            drawPanel(g, mc.font, p, x, y);
+        }
+    }
+
+    private static void drawPanel(GuiGraphicsExtractor g, Font font, Player target, int x, int y) {
         // panel background
         g.fill(x, y, x + PANEL_W, y + PANEL_H, 0x90000000);
- 
+
         // username
         g.text(font, target.getName().getString(), x + 4, y + 4, 0xFFFFFFFF, true);
- 
+
         // health bar
         float health = Math.max(0f, target.getHealth());
         float max = Math.max(1f, target.getMaxHealth());
@@ -234,7 +226,7 @@ public class TargetHudClient implements ClientModInitializer {
         String hpText = String.format("%.1f / %.0f", health, max)
             + (absorption > 0 ? String.format(" (+%.0f)", absorption) : "");
         g.text(font, hpText, x + 4, y + 26, 0xFFFFFFFF, true);
- 
+
         // armor durability: numbers only, two columns
         // left column: Helm, Chest    right column: Legs, Boots
         for (int i = 0; i < ARMOR.length; i++) {
@@ -243,27 +235,27 @@ public class TargetHudClient implements ClientModInitializer {
             int labelX = x + 4 + col * 76;
             int numX = labelX + 32;
             int rowY = y + 38 + row * 10;
- 
+
             ItemStack stack = target.getItemBySlot(ARMOR[i]);
             g.text(font, ARMOR_LABEL[i], labelX, rowY, 0xFFAAAAAA, false);
- 
+
             if (stack.isEmpty()) {
                 g.text(font, "-", numX, rowY, 0xFF777777, false);
                 continue;
             }
- 
+
             if (stack.isDamageableItem() && stack.getMaxDamage() > 0) {
                 int maxDur = stack.getMaxDamage();
                 int left = Math.max(0, maxDur - stack.getDamageValue());
                 float frac = (float) left / maxDur;
- 
+
                 // green normally, yellow under 60%, orange under 40%, red under 20%
                 int color;
                 if (frac >= 0.6f) color = 0xFF3CC83C;
                 else if (frac >= 0.4f) color = 0xFFE6D800;
                 else if (frac >= 0.2f) color = 0xFFFF9020;
                 else color = 0xFFE02828;
- 
+
                 g.text(font, left + "/" + maxDur, numX, rowY, color, true);
             } else {
                 g.text(font, "Unbr.", numX, rowY, 0xFF3CC83C, true);
@@ -271,4 +263,3 @@ public class TargetHudClient implements ClientModInitializer {
         }
     }
 }
- 
