@@ -36,7 +36,7 @@ public class TargetHudClient implements ClientModInitializer {
 
     private static void extract(GuiGraphicsExtractor g, DeltaTracker delta) {
         Minecraft mc = Minecraft.getInstance();
-        if (mc.player == null || mc.level == null || mc.options.hideGui) return;
+        if (mc.player == null || mc.level == null) return;
         if (!(mc.crosshairPickEntity instanceof Player target) || target == mc.player) return;
 
         Font font = mc.font;
